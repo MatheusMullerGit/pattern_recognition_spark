@@ -10,14 +10,29 @@ from functools import reduce
 import gc
 from datetime import datetime, timedelta
 import pyspark
+from pyspark import SparkConf, SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
+import pyspark.sql.functions as F
+from pyspark.sql.types import StructType, StructField, FloatType, StringType, ArrayType
+
+
+os.environ["SPARK_HOME"]="C:/Users/Mathe/AppData/Local/Programs/Python/Python38-32/Lib/site-packages/pyspark/bin/.."
+#os.environ["PYSPARK_PYTHON"]="C:/Users/Mathe/Google\ Drive/Repositorios/pattern_recognition_spark/pattern_recognition_spark/venv/Scripts/python"
+#os.environ["PYSPARK_DRIVER_PYTHON"]="C:/Users/Mathe/Google\ Drive/Repositorios/pattern_recognition_spark/pattern_recognition_spark/venv/Scripts/python"
+
+os.environ["HADOOP_HOME"]="C:/spark/hadoop"
+os.environ["JAVA_HOME"]="C:/Program Files/Java/jdk1.8.0_291"
+os.environ["SCALA_HOME"]="C:/spark/scala/bin"
+#os.environ["SPARK_HOME"]="C:/spark/spark/bin"
+#os.environ["PYTHON_PATH"]="C:/Users/Mathe/Google\ Drive/Repositorios/pattern_recognition_spark/pattern_recognition_spark/venv/Scripts/python.exe"
+#os.environ["PYSPARK_PYTHON"]="C:/Users/Mathe/Google\ Drive/Repositorios/pattern_recognition_spark/pattern_recognition_spark/venv/Scripts/python.exe"
 
 # create sparksession
-spark = SparkSession \
-    .builder \
-    .appName("pyinvest0.1") \
-    .config("spark.executor.memory", "1gb") \
+spark = SparkSession\
+    .builder\
+    .appName("pyinvest0.1")\
+    .config("spark.executor.memory", "4gb")\
+    .config("spark.executor.cores","4")\
     .getOrCreate()
 
 sc = spark.sparkContext
@@ -33,7 +48,7 @@ stocks = os.listdir(FOLDER)
 
 def percentChange(startPoint, currentPoint):
     try:
-        x = ((float(currentPoint) - startPoint) / abs(startPoint)) * 100.00
+        x = ((float(currentPoint) - float(startPoint)) / abs(startPoint)) * 100.00
         if x == 0.0:
             return 0.000000001
         else:
@@ -53,24 +68,25 @@ class Singleton(object):
             cls._instance = super(Singleton, cls).__new__(
                                       cls, *args, **kwargs)
         return cls._instance
-
+    
     def set_dataframe(self, stock):
         self.df = spark.read\
             .option("inferSchema", "true")\
             .option("header", "true")\
             .option("dateFormat", "yyyy-MM-dd")\
             .csv(FOLDER + stock)
-        # self.df['Date'] = pd.to_datetime(self.df['Date'])
-        # self.df['Date'] = (self.df.select(date_format("Date", "yyyy-MM-dd")))
+        self.df = self.df.withColumn('Date', F.to_date(self.df['Date']))
         self.stock = stock.rstrip('.csv')
-
-#    def plot_chart(self):
-#        fig = px.line(self.df, x="Date", y="Adj_Close", title=self.stock)
-#        st.plotly_chart(fig)
 
     def spark_shape(self):
         return (self.count(), len(self.columns))
     pyspark.sql.dataframe.DataFrame.shape = spark_shape
+    
+    
+    def plot_chart(self):
+        fig = px.line(self.df.toPandas(), x="Date", y="Adj_Close", title=self.stock)
+        st.plotly_chart(fig)
+    
 
     def __len__(self):
         return self.df.shape()[0]
@@ -83,14 +99,15 @@ class Singleton(object):
         with st.spinner('Aguarde...'):
             start_time = time.time()
             while index < len(self):
-                avgLine = self.df['Adj_Close'][0:index]
-                dates = self.df['Date'][0:index]
+                self.df = self.df.withColumn('avgLine', self.df['Adj_Close'][0:index])
+                self.df = self.df.withColumn('dates', self.df['Date'][0:index])
 
-                patternAr, performanceAr = self.pattern_storage(avgLine, index)
-                dates, patForRec = self.current_pattern(avgLine, dates)
+                patternAr, performanceAr = self.pattern_storage(self.df.select('avgLine'), index)
+                dates, patForRec = self.current_pattern(self.df.select('avgLine'), self.df.select('dates'))
                 patFound, plotPatAr = self.pattern_recognition(patternAr, patForRec)
+
                 if patFound:    
-                    self.plot(self.df['Adj_Close'], index, dates, performanceAr, plotPatAr, patternAr, patForRec)
+                    self.plot(self.df.select('Adj_Close'), index, dates, performanceAr, plotPatAr, patternAr, patForRec)
 
                 end_time = time.time() - start_time
                 st.text(f'Processamento levou {int(end_time)} segundos para {it} amostras.')
@@ -113,6 +130,9 @@ class Singleton(object):
 
         predictedOutcomesAr = []
 
+        data = data.toPandas()
+        dates = list(dates['dates'].iloc[:].apply(lambda x: datetime.strptime(x, "%Y-%M-%d")))
+
         max_date = max(dates)
 
         for eachPatt in plotPatAr:
@@ -133,12 +153,20 @@ class Singleton(object):
 
             plt.scatter(max_date+timedelta(days=5), performanceAr[futurePoints], c=pcolor, alpha=.3)
 
-        realOutcomeRange = data[index+20:index+30]
-        realAvgOutcome = reduce(lambda x, y: x+y, realOutcomeRange)/len(realOutcomeRange)
-        realMovement = percentChange(data[index], realAvgOutcome)
-        predictedAvgOutcome = reduce(lambda x, y: x+y, predictedOutcomesAr)/len(predictedOutcomesAr)
+        realOutcomeRange_list = list(data[index+20:index+30]['Adj_Close'])
+        rdd3 = sc.parallelize(realOutcomeRange_list)
+        realOutcomeRange_reduced = rdd3.reduce(lambda x, y: x+y)
+        realAvgOutcome = realOutcomeRange_reduced/len(realOutcomeRange_list)
+        
+        realMovement = percentChange(data['Adj_Close'][index], realAvgOutcome)
 
-        predictionAverage = reduce(lambda x, y: x+y, predArray)/len(predArray)
+        rdd4 = sc.parallelize(predictedOutcomesAr)
+        predictedAvgOutcome_reduced = rdd4.reduce(lambda x, y: x+y)
+        predictedAvgOutcome = predictedAvgOutcome_reduced/len(predictedOutcomesAr)
+
+        rdd5 = sc.parallelize(predArray)
+        predictionAverage_reduced = rdd5.reduce(lambda x, y: x+y)
+        predictionAverage = predictionAverage_reduced/len(predArray)
 
         print(predictionAverage)
         if predictionAverage < 0:
@@ -174,48 +202,67 @@ class Singleton(object):
         st.pyplot()
 
     def pattern_storage(self, avgLine, index):
+        """
+        Esta função está ok!!!
+        """
         patternAr = []
         performanceAr = []
 
-        x = (index)-60
+        x = index-60
 
         y = 31
         while y < x:
             pattern = []
-
+            outcomeRange_list = []
+            
             for i in range(29, -1, -1):
-                pattern.append(percentChange(avgLine[y - 30], avgLine[y - i]))
+                pattern.append(percentChange(float(avgLine.collect()[y - 30]['avgLine']), float(avgLine.collect()[y - i]['avgLine'])))
+      
+            for j in range(20, 30):
+                outcomeRange_list.append(float(avgLine.collect()[y+j]['avgLine']))
 
-            outcomeRange = avgLine[y+20:y+30]
-            currentPoint = avgLine[y]
+            rdd1 = sc.parallelize(outcomeRange_list)
+
+            currentPoint = float(avgLine.collect()[y]["avgLine"])
+
             try:
-                avgOutcome = reduce(lambda x, y: x+y, outcomeRange)/len(outcomeRange)
+                outcomeRange_reduced = rdd1.reduce(lambda x, y: x+y)
+                avgOutcome = outcomeRange_reduced/len(outcomeRange_list)
             except Exception as e:
                 print(str(e))
                 avgOutcome = 0
 
-            futureOutcome = percentChange(currentPoint, avgOutcome)
-    
+            futureOutcome = percentChange(currentPoint, avgOutcome)    
             patternAr.append(pattern)
             performanceAr.append(futureOutcome)
 
+            print(f'Pattern storage {y} de {x}')
+            
             y += 1
 
         return patternAr, performanceAr
-
+    
     def current_pattern(self, avgLine, dates):
-        patForRec = avgLine.iloc[-30:-1].apply(lambda x: percentChange(avgLine.iloc[-31], x)).values
-        return dates.iloc[-30:-1], patForRec
-
+        """
+        Esta função está ok!!!
+        """
+        avgLine_pandas= avgLine.toPandas()
+        patForRec = avgLine_pandas['avgLine'].iloc[-30:].apply(lambda x: percentChange(float(avgLine_pandas['avgLine'].iloc[-31]), float(x))).values
+        dates_pandas= dates.toPandas()
+        
+        return dates_pandas.iloc[-30:], patForRec
+        
     def pattern_recognition(self, patternAr, patForRec):
+        """
+        Esta função está ok!!!
+        """
         plotPatAr = []
         patFound = False
 
         for eachPattern in patternAr[0:-5]:
             l = []
             for i in range(0,30):
-                sim = 100.00 - abs(percentChange(eachPattern[i], patForRec[i]))
-
+                sim = 100.00 - abs(percentChange(float(eachPattern[i]), float(patForRec[i])))
                 if i < 15 and sim <= 50:
                     break
 
@@ -226,7 +273,7 @@ class Singleton(object):
             if howSim > 70:
                 patFound = True
                 plotPatAr.append(eachPattern)
-
+           
         return patFound, plotPatAr
 
 
@@ -240,12 +287,12 @@ def main():
     c = Singleton()
     c.set_dataframe(stock)    
 
-    #c.plot_chart()
+    c.plot_chart()
 
     st.text(f'O tamanho do dataframe é {len(c)}')
 
     st.header("Efetuar reconhecimento de padrões")
-    pct = st.slider('Qual a porcentagem dos dados? ', 0.0, 1.0, 0.6, 0.1)
+    pct = st.slider('Qual a porcentagem dos dados? ', 0.0, 1.0, 0.7, 0.05)
 
     if st.button('Iniciar'):
         c.start(pct)
